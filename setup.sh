@@ -20,15 +20,18 @@
 # for unattended runs:
 #   DOTFILES_TOKEN="ghp_xxxx" bash setup.sh dotfiles
 #
-# Remote one-liner (interactive checklist and prompts work fine here — this
-# uses process substitution, not a pipe, so stdin is still your terminal):
-#   bash <(curl -fsSL \
-#     https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh)
+# Remote one-liner — download first, then run (don't use
+# `bash <(curl ...)`: phase 2 re-reads $0 to stage a copy for `sudo -u`,
+# which fails against a process-substitution pipe and aborts the run
+# after phase 1 but before phase 2):
+#   curl -fsSL \
+#     https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh \
+#     -o /tmp/setup.sh && bash /tmp/setup.sh
 #
 # Or pass modules (or 'all') directly:
-#   bash <(curl -fsSL \
-#     https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh) \
-#     all
+#   curl -fsSL \
+#     https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh \
+#     -o /tmp/setup.sh && bash /tmp/setup.sh all
 # =============================================================================
 
 set -euo pipefail

@@ -4,25 +4,38 @@ Modular bootstrap script for fresh Ubuntu 24.04 LTS servers.
 
 ## Usage
 
+Download the script:
+```
+curl -fsSL https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh -o /tmp/setup.sh
+```
+
 Interactive checklist:
 ```
-bash <(curl -fsSL https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh)
+bash /tmp/setup.sh
 ```
 
 Run everything:
 ```
-bash <(curl -fsSL https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh) all
+bash /tmp/setup.sh all
 ```
 
 Run specific modules:
 ```
-bash <(curl -fsSL https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh) docker caddy
+bash /tmp/setup.sh docker caddy
 ```
 
 List modules:
 ```
-bash setup.sh --help
+bash /tmp/setup.sh --help
 ```
+
+> **Note:** don't use the `bash <(curl -fsSL ...)` process-substitution
+> one-liner — phase 2 (the user-phase handoff) needs to re-read `$0` to
+> stage a copy for `sudo -u`, and that read can fail against a process
+> substitution's pipe (`$0` ends up as something like `/dev/fd/63`),
+> aborting the run after phase 1 (root modules) but before phase 2 (user
+> modules) with no clear error. Downloading to a real file first avoids
+> this entirely.
 
 ## Programs installed
 
