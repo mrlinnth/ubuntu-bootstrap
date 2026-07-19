@@ -49,6 +49,10 @@ bash /tmp/setup.sh --help
 - **zsh** — oh-my-zsh, zsh-autosuggestions, zsh-syntax-highlighting
 - **dotfiles** — chezmoi (applies personal dotfiles from a private repo)
 - **node** — Node.js via `n`
+- **syncthing** — Syncthing (official apt repo), user service with linger
+- **cli-tools** — zoxide, fzf, ripgrep, fd-find (via apt)
+- **tui-tools** — helix (hx), yazi, lazygit, lazydocker (GitHub releases)
+- **aichat** — aichat CLI from GitHub releases (sigoden/aichat)
 - **claude-code** — Claude Code CLI
 - **opencode** — OpenCode CLI
 - **codex** — Codex CLI
@@ -60,7 +64,7 @@ Modules that configure the system rather than install software (`timezone`, `swa
 
 Runs as root over SSH. Two phases:
 - **Root phase**: packages, caddy, docker, unattended-upgrades, timezone, swap, user creation, ssh-harden, vnstat
-- **User phase**: hands off to the created user for zsh, dotfiles, node, claude-code, opencode, codex, telebash
+- **User phase**: hands off to the created user for zsh, dotfiles, node, syncthing, cli-tools, tui-tools, aichat, claude-code, opencode, codex, telebash
 
 All modules are idempotent — safe to re-run.
 
