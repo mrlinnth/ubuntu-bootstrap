@@ -78,6 +78,10 @@ MODULE_CATALOG=(
     "zsh|user|Install oh-my-zsh and plugins"
     "dotfiles|user|Apply dotfiles via chezmoi (will prompt for GitHub PAT if DOTFILES_TOKEN isn't set)"
     "node|user|Install Node.js via n"
+    "syncthing|user|Install syncthing (official apt repo), enable user service with linger, create ~/syncthing"
+    "cli-tools|user|Install CLI tools via apt (zoxide, fzf, ripgrep, fd)"
+    "tui-tools|user|Install TUI tools from GitHub releases (helix, yazi, lazygit, lazydocker)"
+    "aichat|user|Install aichat from GitHub releases"
     "claude-code|user|Install Claude Code CLI"
     "opencode|user|Install OpenCode CLI"
     "codex|user|Install Codex CLI"
@@ -494,6 +498,133 @@ EOF
 }
 
 # =============================================================================
+# USER-PHASE HELPERS
+# =============================================================================
+
+# ~/.local/bin is where every non-apt binary in phase 2 lands. mod_telebash
+# writes the profile.d file that puts it on PATH, but cli-tools/tui-tools/
+# aichat must not depend on telebash having been selected in the same run —
+# so they call this to guarantee the directory exists and is on PATH both
+# for the remainder of this script and for future login shells.
+ensure_local_bin() {
+    local bin_dir="/home/${USERNAME}/.local/bin"
+    mkdir -p "${bin_dir}"
+
+    case ":${PATH}:" in
+        *":${bin_dir}:"*) ;;
+        *) export PATH="${bin_dir}:${PATH}" ;;
+    esac
+
+    # Same file mod_telebash writes. Creating it here (without the token
+    # export, which telebash adds later) means PATH works even when
+    # telebash was never run. mod_telebash overwrites it wholesale, so
+    # there's no conflict either way.
+    if [[ ! -f /etc/profile.d/yan-local-bin.sh ]]; then
+        sudo tee /etc/profile.d/yan-local-bin.sh > /dev/null << EOF
+export PATH="${bin_dir}:\$PATH"
+EOF
+        sudo chmod 644 /etc/profile.d/yan-local-bin.sh
+        info "Created /etc/profile.d/yan-local-bin.sh for PATH"
+    fi
+
+    # zsh doesn't read /etc/profile.d on its own — see the longer note in
+    # mod_telebash. Kept in sync here for the same reason.
+    local zprofile="/etc/zsh/zprofile"
+    sudo mkdir -p "$(dirname "${zprofile}")"
+    sudo touch "${zprofile}"
+    if ! grep -qF "yan-local-bin.sh" "${zprofile}"; then
+        echo "[ -f /etc/profile.d/yan-local-bin.sh ] && . /etc/profile.d/yan-local-bin.sh" \
+            | sudo tee -a "${zprofile}" > /dev/null
+    fi
+}
+
+# Maps uname -m to the arch strings used in GitHub release asset names.
+# Echoes a regex alternation because projects disagree (x86_64 vs amd64,
+# aarch64 vs arm64), and matching either is simpler than a per-project map.
+release_arch_pattern() {
+    # Anchored with (_|-|\.) delimiters on both sides so that a 64-bit
+    # pattern can't accidentally match a 32-bit asset. lazydocker, for
+    # instance, ships both Linux_x86.tar.gz and Linux_x86_64.tar.gz — a
+    # bare "x86_64|x64" alternation risks selecting the wrong one.
+    case "$(uname -m)" in
+        x86_64)  echo "[_.-](x86_64|amd64)([_.-]|$)" ;;
+        aarch64) echo "[_.-](aarch64|arm64)([_.-]|$)" ;;
+        *)       err "Unsupported architecture: $(uname -m)"; return 1 ;;
+    esac
+}
+
+# Resolves the newest release of a GitHub repo and echoes the download URL
+# of the first asset matching the given regex.
+#
+# Uses the unauthenticated API (60 requests/hour per IP). A full run makes
+# five calls total, so the limit is not a practical concern — but if you
+# ever hit it, export GITHUB_TOKEN and it'll be used automatically.
+github_latest_asset_url() {
+    local repo="$1" pattern="$2"
+    local api="https://api.github.com/repos/${repo}/releases/latest"
+    local -a auth=()
+    [[ -n "${GITHUB_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+
+    curl -fsSL "${auth[@]}" "${api}" \
+        | grep -oE '"browser_download_url": *"[^"]+"' \
+        | sed -E 's/.*"(https[^"]+)"/\1/' \
+        | grep -E "${pattern}" \
+        | head -n1
+}
+
+# Downloads the matching asset for a repo, extracts it, locates the named
+# binary anywhere in the archive, and installs it to ~/.local/bin.
+#
+# Handles .tar.gz, .tar.xz and .zip because these five projects don't agree
+# on a format. Skips entirely if the command already resolves — per the
+# "exists, skip" idempotency rule the rest of this script follows.
+install_github_binary() {
+    local repo="$1" binary="$2" asset_pattern="$3"
+    local bin_dir="/home/${USERNAME}/.local/bin"
+
+    if command -v "${binary}" &>/dev/null; then
+        info "${binary} already installed ($(command -v "${binary}")), skipping"
+        return 0
+    fi
+
+    local url
+    url="$(github_latest_asset_url "${repo}" "${asset_pattern}")"
+    if [[ -z "${url}" ]]; then
+        err "Could not find a ${binary} release asset for this architecture."
+        err "Checked ${repo} against pattern: ${asset_pattern}"
+        return 1
+    fi
+    info "Downloading ${binary} from ${url##*/}"
+
+    local tmp
+    tmp="$(mktemp -d)"
+    # Cleaned up on every exit path, including the error returns below.
+    trap 'rm -rf "${tmp}"' RETURN
+
+    local archive="${tmp}/${url##*/}"
+    curl -fsSL "${url}" -o "${archive}"
+
+    case "${archive}" in
+        *.tar.gz|*.tgz) tar -xzf "${archive}" -C "${tmp}" ;;
+        *.tar.xz)       tar -xJf "${archive}" -C "${tmp}" ;;
+        *.zip)          unzip -qo "${archive}" -d "${tmp}" ;;
+        *)              err "Unrecognized archive format: ${archive##*/}"; return 1 ;;
+    esac
+
+    # Release tarballs vary in whether they nest the binary in a versioned
+    # directory, so search rather than assuming a path.
+    local found
+    found="$(find "${tmp}" -type f -name "${binary}" -perm -u+x | head -n1)"
+    if [[ -z "${found}" ]]; then
+        err "Extracted ${repo} archive but found no '${binary}' executable inside."
+        return 1
+    fi
+
+    install -m 755 "${found}" "${bin_dir}/${binary}"
+    info "${binary} installed to ${bin_dir}/${binary}"
+}
+
+# =============================================================================
 # USER-PHASE MODULES (run as USERNAME)
 # =============================================================================
 
@@ -563,6 +694,165 @@ mod_node() {
     else
         info "Node.js already installed: $(node --version)"
     fi
+}
+
+mod_syncthing() {
+    local home_dir="/home/${USERNAME}"
+    local keyring="/etc/apt/keyrings/syncthing-archive-keyring.gpg"
+
+    log "Installing syncthing"
+    # Ubuntu's own syncthing package lags the upstream release badly, and
+    # syncthing's protocol compatibility window is version-sensitive — so
+    # use the official repo rather than universe.
+    if ! command -v syncthing &>/dev/null; then
+        sudo install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://syncthing.net/release-key.gpg \
+            | sudo tee "${keyring}" > /dev/null
+        sudo chmod a+r "${keyring}"
+        echo "deb [signed-by=${keyring}] https://apt.syncthing.net/ syncthing stable" \
+            | sudo tee /etc/apt/sources.list.d/syncthing.list > /dev/null
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq syncthing
+        info "syncthing installed: $(syncthing --version | head -n1)"
+    else
+        info "syncthing already installed, skipping"
+    fi
+
+    log "Creating sync directory"
+    mkdir -p "${home_dir}/syncthing"
+    info "Sync directory ready at ${home_dir}/syncthing"
+
+    # Without linger, the user manager is torn down when the last SSH
+    # session ends, taking syncthing with it. On a server there's usually
+    # no logged-in session at all, so linger is what makes --user services
+    # behave like system services.
+    log "Enabling linger for ${USERNAME}"
+    if [[ "$(loginctl show-user "${USERNAME}" --property=Linger --value 2>/dev/null)" == "yes" ]]; then
+        info "Linger already enabled, skipping"
+    else
+        sudo loginctl enable-linger "${USERNAME}"
+        info "Linger enabled — user services now survive logout"
+    fi
+
+    log "Enabling syncthing user service"
+    # The handoff from root via sudo doesn't set up a user D-Bus session,
+    # so systemctl --user needs to be pointed at the user manager socket
+    # explicitly. Without this it fails with "Failed to connect to bus".
+    export XDG_RUNTIME_DIR="/run/user/$(id -u "${USERNAME}")"
+    if systemctl --user is-enabled syncthing.service &>/dev/null; then
+        info "syncthing user service already enabled"
+        systemctl --user restart syncthing.service
+    else
+        systemctl --user enable --now syncthing.service
+        info "syncthing user service enabled and started"
+    fi
+
+    info "GUI listens on 127.0.0.1:8384 (local only, as intended)"
+    info "Reach it with: ssh -L 8384:127.0.0.1:8384 ${USERNAME}@<server>"
+    info "Then open http://127.0.0.1:8384 and add ${home_dir}/syncthing as a folder"
+}
+
+mod_cli_tools() {
+    local bin_dir="/home/${USERNAME}/.local/bin"
+
+    ensure_local_bin
+
+    log "Installing CLI tools via apt"
+    # All four are in Ubuntu 24.04 universe. Versions trail upstream, but
+    # they come with unattended-upgrades coverage for free.
+    sudo apt-get install -y -qq \
+        zoxide \
+        fzf \
+        ripgrep \
+        fd-find
+
+    # Debian ships fd's binary as 'fdfind' to avoid a name collision with
+    # the unrelated fdclone package. The symlink is the documented fix and
+    # is what makes `fd` work as expected.
+    log "Linking fdfind as fd"
+    if [[ -x "${bin_dir}/fd" ]]; then
+        info "fd already linked, skipping"
+    elif command -v fdfind &>/dev/null; then
+        ln -sf "$(command -v fdfind)" "${bin_dir}/fd"
+        info "Linked $(command -v fdfind) -> ${bin_dir}/fd"
+    else
+        err "fd-find installed but fdfind not found on PATH — skipping symlink"
+    fi
+
+    info "Installed: zoxide, fzf, ripgrep, fd"
+}
+
+mod_tui_tools() {
+    local home_dir="/home/${USERNAME}"
+    local arch
+    arch="$(release_arch_pattern)"
+
+    ensure_local_bin
+
+    # yazi shells out to `file` for MIME detection. The richer preview
+    # dependencies (ffmpegthumbnailer, poppler-utils, imagemagick) are
+    # deliberately omitted — they're dead weight on a headless server.
+    log "Installing yazi dependency: file"
+    sudo apt-get install -y -qq file
+
+    log "Installing helix"
+    if command -v hx &>/dev/null; then
+        info "helix already installed, skipping"
+    else
+        # helix is the one tool here that isn't a standalone binary: it
+        # needs its runtime/ directory for syntax highlighting and LSP
+        # config, and the binary is named 'hx'. So it can't go through
+        # install_github_binary and is handled manually.
+        local url tmp
+        url="$(github_latest_asset_url "helix-editor/helix" "${arch}linux.*\.tar\.xz$")"
+        if [[ -z "${url}" ]]; then
+            err "Could not find a helix release asset for this architecture."
+            return 1
+        fi
+        info "Downloading helix from ${url##*/}"
+        tmp="$(mktemp -d)"
+        curl -fsSL "${url}" -o "${tmp}/helix.tar.xz"
+        tar -xJf "${tmp}/helix.tar.xz" -C "${tmp}"
+
+        local hx_bin runtime_src
+        hx_bin="$(find "${tmp}" -type f -name hx -perm -u+x | head -n1)"
+        runtime_src="$(find "${tmp}" -type d -name runtime | head -n1)"
+        if [[ -z "${hx_bin}" || -z "${runtime_src}" ]]; then
+            err "helix archive did not contain the expected hx binary and runtime/ directory."
+            rm -rf "${tmp}"
+            return 1
+        fi
+
+        install -m 755 "${hx_bin}" "${home_dir}/.local/bin/hx"
+        mkdir -p "${home_dir}/.local/share/helix"
+        rm -rf "${home_dir}/.local/share/helix/runtime"
+        cp -r "${runtime_src}" "${home_dir}/.local/share/helix/runtime"
+        rm -rf "${tmp}"
+        info "helix installed as 'hx', runtime at ${home_dir}/.local/share/helix/runtime"
+    fi
+
+    log "Installing yazi"
+    # yazi ships a zip with the binary nested in a versioned directory;
+    # install_github_binary finds it by name regardless of depth.
+    install_github_binary "sxyazi/yazi" "yazi" "${arch}unknown-linux-gnu\.zip$"
+
+    log "Installing lazygit"
+    install_github_binary "jesseduffield/lazygit" "lazygit" "[Ll]inux${arch}tar\.gz$"
+
+    log "Installing lazydocker"
+    install_github_binary "jesseduffield/lazydocker" "lazydocker" "[Ll]inux${arch}tar\.gz$"
+}
+
+mod_aichat() {
+    local arch
+    arch="$(release_arch_pattern)"
+
+    ensure_local_bin
+
+    log "Installing aichat"
+    # Config lives in ~/.config/aichat/config.yaml and is managed by the
+    # dotfiles repo, so nothing is seeded here.
+    install_github_binary "sigoden/aichat" "aichat" "${arch}unknown-linux-musl\.tar\.gz$"
 }
 
 mod_claude_code() {
