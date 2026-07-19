@@ -20,18 +20,15 @@
 # for unattended runs:
 #   DOTFILES_TOKEN="ghp_xxxx" bash setup.sh dotfiles
 #
-# Remote one-liner — download first, then run (don't use
-# `bash <(curl ...)`: phase 2 re-reads $0 to stage a copy for `sudo -u`,
-# which fails against a process-substitution pipe and aborts the run
-# after phase 1 but before phase 2):
-#   curl -fsSL \
-#     https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh \
-#     -o /tmp/setup.sh && bash /tmp/setup.sh
+# Remote one-liner (interactive checklist and prompts work fine here — this
+# uses process substitution, not a pipe, so stdin is still your terminal):
+#   bash <(curl -fsSL \
+#     https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh)
 #
 # Or pass modules (or 'all') directly:
-#   curl -fsSL \
-#     https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh \
-#     -o /tmp/setup.sh && bash /tmp/setup.sh all
+#   bash <(curl -fsSL \
+#     https://raw.githubusercontent.com/mrlinnth/ubuntu-bootstrap/main/setup.sh) \
+#     all
 # =============================================================================
 
 set -euo pipefail
@@ -598,8 +595,6 @@ install_github_binary() {
 
     local tmp
     tmp="$(mktemp -d)"
-    # Cleaned up on every exit path, including the error returns below.
-    trap 'rm -rf "${tmp}"' RETURN
 
     local archive="${tmp}/${url##*/}"
     curl -fsSL "${url}" -o "${archive}"
@@ -608,7 +603,8 @@ install_github_binary() {
         *.tar.gz|*.tgz) tar -xzf "${archive}" -C "${tmp}" ;;
         *.tar.xz)       tar -xJf "${archive}" -C "${tmp}" ;;
         *.zip)          unzip -qo "${archive}" -d "${tmp}" ;;
-        *)              err "Unrecognized archive format: ${archive##*/}"; return 1 ;;
+        *)              err "Unrecognized archive format: ${archive##*/}"
+                        rm -rf "${tmp}"; return 1 ;;
     esac
 
     # Release tarballs vary in whether they nest the binary in a versioned
@@ -617,10 +613,12 @@ install_github_binary() {
     found="$(find "${tmp}" -type f -name "${binary}" -perm -u+x | head -n1)"
     if [[ -z "${found}" ]]; then
         err "Extracted ${repo} archive but found no '${binary}' executable inside."
+        rm -rf "${tmp}"
         return 1
     fi
 
     install -m 755 "${found}" "${bin_dir}/${binary}"
+    rm -rf "${tmp}"
     info "${binary} installed to ${bin_dir}/${binary}"
 }
 
